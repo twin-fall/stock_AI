@@ -12,11 +12,9 @@ st.set_page_config(page_title="Ray's AI Analyst", page_icon="📈", layout="wide
 # [2] 비밀 금고에서 API 키 꺼내기
 # ---------------------------------------------------------
 try:
-    # 스트림릿 금고(Secrets)에서 키를 가져옴
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    # 혹시 키 설정 안 했을 때를 대비한 안내
-    st.error("⚠️ API 키가 없어요! Streamlit Settings -> Secrets 에 키를 넣어주세요.")
+    st.error("⚠️ API 키가 없어요! Settings -> Secrets 에 키를 넣어주세요.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -29,71 +27,83 @@ st.markdown("---")
 # 사이드바 설정
 with st.sidebar:
     st.header("🔍 검색 옵션")
-    # 기본값을 삼성전자로 설정
-    user_input = st.text_input("종목명 또는 코드", value="삼성전자")
+    # 팁: 에러가 나면 '종목명' 대신 '코드(005930)'를 넣으면 됨!
+    user_input = st.text_input("종목명 또는 코드 (예: 005930)", value="005930") 
     days = st.slider("분석 기간 (일)", 30, 365, 100)
 
 if user_input:
-    # 캐싱으로 속도 향상 (매번 다운로드 안 받게)
+    # ---------------------------------------------------------
+    # [핵심 수정] 리스트 다운로드 실패 시 '좀비 모드' 발동 🧟
+    # ---------------------------------------------------------
     @st.cache_data
     def get_stock_list():
-        return fdr.StockListing('KRX')
+        try:
+            return fdr.StockListing('KRX')
+        except Exception:
+            return None # 실패하면 그냥 빈손으로 돌아옴 (에러 안 냄!)
 
-    try:
-        with st.spinner("종목 정보를 찾는 중... 슝슝 💨"):
-            df_stocks = get_stock_list()
-            
-        # 이름이나 코드로 종목 찾기
+    # 1. 일단 거래소 명단 가져오기 시도
+    with st.spinner("종목 정보 확인 중..."):
+        df_stocks = get_stock_list()
+
+    target_code = ""
+    target_name = ""
+
+    # 2. 명단을 가져왔으면 이름으로 찾기
+    if df_stocks is not None:
         search_result = df_stocks[ (df_stocks['Code'] == user_input) | (df_stocks['Name'] == user_input) ]
-        
         if not search_result.empty:
             target_code = search_result.iloc[0]['Code']
             target_name = search_result.iloc[0]['Name']
-            
+    
+    # 3. [중요] 명단 못 가져왔거나 검색 실패하면 -> 입력값을 그냥 '코드'로 인식!
+    if not target_code:
+        # 사용자가 입력한 게 6자리 숫자(코드)라고 가정
+        target_code = user_input
+        target_name = user_input # 이름은 모르니까 그냥 코드 보여줌
+
+    # ---------------------------------------------------------
+    # [4] 차트 & AI 분석 (여기는 동일!)
+    # ---------------------------------------------------------
+    if target_code:
+        try:
             st.subheader(f"📈 {target_name} ({target_code})")
             
-            # [진짜 데이터 가져오기]
+            # 주가 데이터 가져오기
             today = datetime.datetime.now()
             start_date = today - datetime.timedelta(days=days)
             df_chart = fdr.DataReader(target_code, start_date, today)
 
-            # 차트 그리기 (빨간색 상승 그래프 느낌!)
-            st.line_chart(df_chart['Close'], color="#FF4B4B")
+            if df_chart.empty:
+                st.warning("데이터를 찾을 수 없습니다. 올바른 종목 코드(6자리)인지 확인해주세요!")
+            else:
+                # 차트 그리기
+                st.line_chart(df_chart['Close'], color="#FF4B4B")
 
-            # 데이터 표 (최신순 5개만 깔끔하게)
-            st.dataframe(df_chart.sort_index(ascending=False).head(5), use_container_width=True)
+                # 데이터 표
+                st.dataframe(df_chart.sort_index(ascending=False).head(5), use_container_width=True)
 
-            # -------------------------------------------------------
-            # [AI 분석 버튼] 여기가 하이라이트! ✨
-            # -------------------------------------------------------
-            if st.button("🤖 AI 심층 리포트 생성 (Click)"):
-                with st.spinner(f"{target_name} 데이터를 분석하고 있어! 잠시만... 🧠"):
-                    genai.configure(api_key=API_KEY)
-                    model = genai.GenerativeModel('gemini-pro')
+                # AI 분석 버튼
+                if st.button("🤖 AI 심층 리포트 생성 (Click)"):
+                    with st.spinner(f"데이터 분석 중... 🧠"):
+                        genai.configure(api_key=API_KEY)
+                        model = genai.GenerativeModel('gemini-pro')
+                        recent_data = df_chart.tail(30).to_string()
 
-                    # 데이터 텍스트로 변환
-                    recent_data = df_chart.tail(30).to_string()
+                        prompt = f"""
+                        당신은 주식 전문가입니다. '{target_name}'(코드:{target_code})의 주가를 분석해주세요.
+                        [최근 30일 데이터]
+                        {recent_data}
+                        [요청]
+                        1. 추세 요약 (상승/하락)
+                        2. 특이 패턴 분석
+                        3. 투자 전략 제안
+                        4. 한국어로 작성
+                        """
+                        response = model.generate_content(prompt)
+                        st.success("분석 완료!")
+                        st.markdown(response.text)
 
-                    prompt = f"""
-                    당신은 전문 주식 애널리스트입니다. '{target_name}'의 주가 데이터를 분석해주세요.
-                    
-                    [최근 30일 데이터]
-                    {recent_data}
-
-                    [요청사항]
-                    1. 최근 주가 추세 (상승/하락/횡보)를 요약하세요.
-                    2. 투자자가 유의해야 할 변동성이나 패턴이 있는지 설명하세요.
-                    3. 향후 전망 및 투자 전략을 제안하세요.
-                    4. 한국어로, 전문적이고 간결하게 작성하세요.
-                    """
-
-                    response = model.generate_content(prompt)
-                    st.success("분석 완료! 😎")
-                    st.markdown("### 📝 AI Analyst Report")
-                    st.write(response.text)
-
-        else:
-            st.warning("음? 그런 종목은 없는데? 이름을 다시 확인해줘! 🤔")
-
-    except Exception as e:
-        st.error(f"으악! 에러가 났어: {e}")
+        except Exception as e:
+            # 여기서 나는 에러는 진짜 데이터가 없는 경우
+            st.error(f"데이터를 가져올 수 없습니다. (종목 코드를 정확히 입력했나요?): {e}")
